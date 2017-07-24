@@ -10,7 +10,6 @@ package main
 
 import (
 	"container/list"
-	"sync"
 )
 
 // CacheSize determines how big the cache can grow
@@ -24,17 +23,18 @@ type KeyStoreCacheLoader interface {
 
 // KeyStoreCache is a LRU cache for string key-value pairs
 type KeyStoreCache struct {
-	sync.Mutex
-	cache map[string]string
-	pages list.List
-	load  func(string) string
+	cache   map[string]string
+	pages   list.List
+	load    func(string) string
+	deletes chan string
 }
 
 // New creates a new KeyStoreCache
 func New(load KeyStoreCacheLoader) *KeyStoreCache {
 	return &KeyStoreCache{
-		load:  load.Load,
-		cache: make(map[string]string),
+		load:    load.Load,
+		cache:   make(map[string]string),
+		deletes: make(chan string),
 	}
 }
 
@@ -44,17 +44,21 @@ func (k *KeyStoreCache) Get(key string) string {
 
 	// Miss - load from database and save it in cache
 	if !ok {
-		val = k.load(key)
+		k.deletes <- key
+	}
 
-		k.Lock()
-		defer k.Unlock()
-		k.pages.PushFront(key)
+	return val
+}
 
-		// if cache is full remove the least used item
-		if len(k.cache) > CacheSize {
-			delete(k.cache, k.pages.Back().Value.(string))
-			k.pages.Remove(k.pages.Back())
-		}
+func (k *KeyStoreCache) Miss(key string) string {
+	val := k.load(key)
+
+	k.pages.PushFront(key)
+
+	// if cache is full remove the least used item
+	if len(k.cache) > CacheSize {
+		delete(k.cache, k.pages.Back().Value.(string))
+		k.pages.Remove(k.pages.Back())
 	}
 
 	return val
@@ -80,6 +84,16 @@ func main() {
 		DB: GetMockDB(),
 	}
 	cache := New(&loader)
+
+	// Use one goroutine which is the only one which processes "misses"
+	// Don't have to use locks that way since no one else will do
+	// writes to k.pages or k.cache
+	go func() {
+		for {
+			key := <-cache.deletes
+			cache.Miss(key)
+		}
+	}()
 
 	RunMockServer(cache)
 }
