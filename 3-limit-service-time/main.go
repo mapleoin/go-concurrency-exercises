@@ -11,6 +11,7 @@
 package main
 
 import (
+	"sync/atomic"
 	"time"
 )
 
@@ -22,26 +23,40 @@ type User struct {
 	TimeUsed  int64 // in seconds
 }
 
+const seconds_per_user = 10
+
 // HandleRequest runs the processes requested by users. Returns false
 // if process had to be killed
 func HandleRequest(process func(), u *User) bool {
-	if u.IsPremium {
-		process()
-		return true
+	// if u.IsPremium {
+	// 	process()
+	// 	return true
+	// }
+
+	if atomic.LoadInt64(&u.TimeUsed) >= seconds_per_user {
+		return false
 	}
 
-	request_timer := time.NewTimer(time.Second * 10)
+	ticker := time.NewTicker(time.Second)
 
 	process_done := make(chan bool)
 	go func() {
 		process()
 		process_done <- true
 	}()
-	select {
-	case <-process_done:
-		return true
-	case <-request_timer.C:
-		return false
+
+	for {
+		select {
+		case <-process_done:
+			return true
+		// every second add up the time used to the user object
+		// and check if they've exceeded the alloted time
+		case <-ticker.C:
+			atomic.AddInt64(&u.TimeUsed, 1)
+			if atomic.LoadInt64(&u.TimeUsed) >= seconds_per_user {
+				return false
+			}
+		}
 	}
 }
 
